@@ -19,6 +19,9 @@ on:
 permissions:
   contents: write
 
+env:
+  DOTNET_ROLL_FORWARD: LatestMajor
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Free disk
-        run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift || true
+        run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift /usr/share/dotnet/sdk/*/Sdks/Microsoft.NET.Sdk.Android || true
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
@@ -35,33 +38,24 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
 
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+
       - name: Tools download
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           mkdir -p tools/il2cpp work dist tools/il2cpp_temp
-
-          # 1. Apktool
           curl -sLf -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
-          
-          # 2. Il2CppDumper
           gh release download --repo Perfare/Il2CppDumper -p '*.zip' -D tools/il2cpp_temp --clobber
-          for z in tools/il2cpp_temp/*.zip; do
-            unzip -qo "$z" -d tools/il2cpp
-          done
+          for z in tools/il2cpp_temp/*.zip; do unzip -qo "$z" -d tools/il2cpp; done
           rm -rf tools/il2cpp_temp
-
-          # 3. Android Build Tools
           BT="$(ls -d /usr/local/lib/android/sdk/build-tools/* 2>/dev/null | sort -V | tail -1)"
           if [ -n "$BT" ]; then
-            echo "Using Android Build Tools: $BT"
             echo "$BT" >> "$GITHUB_PATH"
             echo "LD_LIBRARY_PATH=$BT" >> "$GITHUB_ENV"
-            "$BT/aapt2" version
-            "$BT/apksigner" --version
           else
-            echo "Build-tools SDK not found, installing fallback..."
             sudo apt-get update && sudo apt-get install -y zipalign apksigner aapt
           fi
 
@@ -69,13 +63,47 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          gh release download base -p '*.apk' -O base.apk --clobber
-          ls -lh base.apk
+          set -euo pipefail
+          rm -rf work/in work/app work/libsplit; mkdir -p work/in work/app
+          gh release download base -D work/in --clobber
+          ls -lh work/in
 
-          # Seedhe decompile karein
-          java -jar tools/apktool.jar d -f base.apk -o work/app --use-aapt2
-          rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi || true
+          SRC=""; A64=""
+          for f in work/in/*; do
+            if unzip -l "$f" 2>/dev/null | grep -qE '\.apk$'; then
+              echo "[+] bundle container mila: $f"
+              mkdir -p work/in/x && unzip -qo "$f" -d work/in/x
+              break
+            fi
+          done
+
+          if [ -d work/in/x ]; then
+            SRC="$(find work/in/x -name '*.apk' ! -name 'split_*' | head -1)"
+            A64="$(find work/in/x -name 'split_config.arm64_v8a.apk' | head -1)"
+          else
+            SRC="$(find work/in -maxdepth 1 -name '*.apk' ! -name 'split_*' | head -1)"
+            A64="$(find work/in -maxdepth 1 -name 'split_config.arm64_v8a.apk' | head -1)"
+          fi
+          test -n "$SRC" || { echo "[!] base apk nahi mila"; ls -R work/in; exit 1; }
+          echo "[+] base: $SRC"
+          echo "--- andar ki ABIs:"; unzip -l "$SRC" | grep -E 'lib/[^/]+/' | awk -F/ '{print $2}' | sort -u || echo "lib/ hai hi nahi"
+
+          java -jar tools/apktool.jar d -f "$SRC" -o work/app --use-aapt2
+          mkdir -p work/app/lib
+
+          if [ -n "$A64" ]; then
+            echo "[+] arm64 split: $A64"
+            mkdir -p work/app/lib/arm64-v8a
+            unzip -qo "$A64" 'lib/arm64-v8a/*' -d work/libsplit
+            cp -f work/libsplit/lib/arm64-v8a/* work/app/lib/arm64-v8a/
+          fi
+
+          if [ -f work/app/lib/arm64-v8a/libil2cpp.so ]; then
+            rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi work/app/lib/x86 work/app/lib/x86_64
+            ls -lh work/app/lib/arm64-v8a/
+          else
+            echo "[!] libil2cpp.so nahi mila. lib listing:"; ls -R work/app/lib | head -40; exit 1
+          fi
 
       - name: Version check
         run: |
@@ -85,13 +113,15 @@ jobs:
 
       - name: Dump il2cpp
         run: |
-          set +e
+          set -e
+          test -f work/app/lib/arm64-v8a/libil2cpp.so || { echo "so missing"; exit 1; }
+          MD="$(find work/app -name global-metadata.dat | head -1)"
+          test -n "$MD" || { echo "global-metadata.dat missing"; exit 1; }
+          echo "[+] metadata: $MD"
           IL2CPP_DLL="$(find tools/il2cpp -name Il2CppDumper.dll -type f | head -1)"
-          dotnet "$IL2CPP_DLL" \
-            work/app/lib/arm64-v8a/libil2cpp.so \
-            work/app/assets/bin/Data/Managed/Metadata/global-metadata.dat \
-            work/dump > work/dump.log 2>&1
-          tail -15 work/dump.log
+          set +e
+          dotnet "$IL2CPP_DLL" work/app/lib/arm64-v8a/libil2cpp.so "$MD" work/dump 2>&1 | tee work/dump.log
+          tail -20 work/dump.log
 
       - name: Recon
         if: ${{ inputs.mode == 'recon' }}
@@ -103,18 +133,35 @@ jobs:
 
       - name: Rebuild
         if: ${{ inputs.mode == 'build' }}
-        run: java -jar tools/apktool.jar b work/app -o work/u.apk --use-aapt2
+        run: |
+          set -e
+          java -jar tools/apktool.jar b work/app -o work/u.apk --use-aapt2
+          # extractNativeLibs=false par compressed .so crash karta hai -> store karo
+          python - <<'EOF'
+          import zipfile, os
+          src, dst = "work/u.apk", "work/u2.apk"
+          with zipfile.ZipFile(src) as zi, zipfile.ZipFile(dst, "w") as zo:
+              for it in zi.infolist():
+                  data = zi.read(it.filename)
+                  if it.filename.endswith(".so"):
+                      ni = zipfile.ZipInfo(it.filename, it.date_time)
+                      ni.external_attr = it.external_attr
+                      ni.compress_type = zipfile.ZIP_STORED
+                      zo.writestr(ni, data)
+                  else:
+                      zo.writestr(it, data)
+          os.replace(dst, src)
+          print("libs stored (uncompressed)")
+          EOF
 
       - name: Keystore + Sign
         if: ${{ inputs.mode == 'build' }}
         run: |
           set -e
           if [ -f patcher/ks.b64 ]; then
-            echo "[+] purana keystore mil gaya"
             base64 -d patcher/ks.b64 > ks.jks
             PASS="$(cat patcher/ks.pass)"
           else
-            echo "[+] naya keystore bana raha hoon"
             PASS="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
             keytool -genkeypair -keystore ks.jks -alias eightbp -keyalg RSA -keysize 2048 \
               -validity 12000 -storepass "$PASS" -keypass "$PASS" -dname "CN=8bp"
@@ -131,18 +178,27 @@ jobs:
             --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
             --out dist/8BP-mod.apk work/a.apk
           apksigner verify dist/8BP-mod.apk
+          unzip -l dist/8BP-mod.apk | grep 'lib/' | head
           ls -lh dist/
 
       - name: Summary
         if: always()
         run: |
-          if [ -f dist/summary.md ]; then cat dist/summary.md >> $GITHUB_STEP_SUMMARY; fi
-          if [ -f work/dump.log ]; then tail -15 work/dump.log >> $GITHUB_STEP_SUMMARY; fi
+          {
+            echo "## ABIs / libs"
+            ls -R work/app/lib 2>/dev/null | head -20 || echo "work/app/lib nahi bana"
+            echo; echo "## dump.log"
+            tail -25 work/dump.log 2>/dev/null || echo "dump.log nahi bana"
+            echo; echo "## recon/patch"
+            cat dist/summary.md 2>/dev/null || true
+          } >> $GITHUB_STEP_SUMMARY
           exit 0
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: out-${{ inputs.mode }}
-          path: dist/
+          path: |
+            dist/
+            work/dump.log
           if-no-files-found: warn
