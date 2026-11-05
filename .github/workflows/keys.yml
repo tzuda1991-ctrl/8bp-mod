@@ -1,0 +1,17 @@
+name: keys
+on: { workflow_dispatch: {} }
+jobs:
+  k:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - run: |
+          P="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+          keytool -genkeypair -keystore ks.jks -alias eightbp -keyalg RSA -keysize 2048 \
+            -validity 12000 -storepass "$P" -keypass "$P" -dname "CN=8bp" > /dev/null 2>&1
+          base64 -w0 ks.jks > ks.b64
+          mkdir o && mv ks.b64 o/ && printf '%s' "$P" > o/pass.txt
+          cat o/pass.txt >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with: { name: keys, path: o/ }
