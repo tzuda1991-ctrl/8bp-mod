@@ -17,7 +17,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   run:
@@ -25,14 +25,22 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift || true
+
+      - name: Free disk
+        run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift || true
+
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
+
       - uses: android-actions/setup-android@v3
-      - run: sdkmanager "build-tools;34.0.0" "platform-tools"
+
+      - name: Build tools
+        run: sdkmanager "build-tools;34.0.0" "platform-tools"
+
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - name: Tools
+
+      - name: Tools download
         run: |
           set -e
           mkdir -p tools work dist
@@ -40,52 +48,80 @@ jobs:
           curl -sL -o tools/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.4/APKEditor-1.4.4.jar
           curl -sL -o tools/il2cpp.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-net8-v6.7.40.zip
           unzip -q tools/il2cpp.zip -d tools/il2cpp
-      - name: Base APK
-        env: { GH_TOKEN: "${{ github.token }}" }
+
+      - name: Base APK lao + kholo
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           gh release download base -p '*.apk' -O base.apk --clobber
+          ls -lh base.apk
           java -jar tools/APKEditor.jar m -i base.apk -o merged.apk -f
           java -jar tools/apktool.jar d -f merged.apk -o work/app --use-aapt2
           rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi || true
+
       - name: Version check
         run: |
-          F=""; [ "${{ inputs.allow_mismatch }}" = "true" ] && F="--allow"
+          F=""
+          if [ "${{ inputs.allow_mismatch }}" = "true" ]; then F="--allow"; fi
           python scripts/8bp.py gate --yml work/app/apktool.yml $F
-      - name: Dump
+
+      - name: Dump il2cpp
         run: |
           set +e
-          dotnet tools/il2cpp/tools/Il2CppDumper.dll work/app/lib/arm64-v8a/libil2cpp.so \
-            work/app/assets/bin/Data/Managed/Metadata/global-metadata.dat work/dump > work/dump.log 2>&1
+          dotnet tools/il2cpp/tools/Il2CppDumper.dll \
+            work/app/lib/arm64-v8a/libil2cpp.so \
+            work/app/assets/bin/Data/Managed/Metadata/global-metadata.dat \
+            work/dump > work/dump.log 2>&1
           tail -15 work/dump.log
+
       - name: Recon
         if: ${{ inputs.mode == 'recon' }}
         run: python scripts/8bp.py recon --app work/app
+
       - name: Patch
         if: ${{ inputs.mode == 'build' }}
         run: python scripts/8bp.py patch --app work/app --scale "${{ inputs.scale }}"
+
       - name: Rebuild
         if: ${{ inputs.mode == 'build' }}
         run: java -jar tools/apktool.jar b work/app -o work/u.apk --use-aapt2
-      - name: Sign
+
+      - name: Keystore + Sign
         if: ${{ inputs.mode == 'build' }}
-        env:
-          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
-          KEY_PASS: ${{ secrets.KEY_PASS }}
         run: |
           set -e
+          if [ -f patcher/ks.b64 ]; then
+            echo "[+] purana keystore mil gaya"
+            base64 -d patcher/ks.b64 > ks.jks
+            PASS="$(cat patcher/ks.pass)"
+          else
+            echo "[+] naya keystore bana raha hoon"
+            PASS="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+            keytool -genkeypair -keystore ks.jks -alias eightbp -keyalg RSA -keysize 2048 \
+              -validity 12000 -storepass "$PASS" -keypass "$PASS" -dname "CN=8bp"
+            base64 -w0 ks.jks > patcher/ks.b64
+            printf '%s' "$PASS" > patcher/ks.pass
+            git config user.name "8bp-bot"
+            git config user.email "bot@local"
+            git add patcher/ks.b64 patcher/ks.pass
+            git commit -m "keystore" || true
+            git push origin HEAD:${{ github.ref_name }} || true
+          fi
           zipalign -p -f 4 work/u.apk work/a.apk
-          echo "$KEYSTORE_B64" | base64 -d > ks.jks
           apksigner sign --ks ks.jks --ks-key-alias eightbp \
-            --ks-pass "pass:$KEY_PASS" --key-pass "pass:$KEY_PASS" \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
             --out dist/8BP-mod.apk work/a.apk
           apksigner verify dist/8BP-mod.apk
+          ls -lh dist/
+
       - name: Summary
         if: always()
         run: |
-          [ -f dist/summary.md ] && cat dist/summary.md >> $GITHUB_STEP_SUMMARY
-          [ -f work/dump.log ] && tail -15 work/dump.log >> $GITHUB_STEP_SUMMARY
+          if [ -f dist/summary.md ]; then cat dist/summary.md >> $GITHUB_STEP_SUMMARY; fi
+          if [ -f work/dump.log ]; then tail -15 work/dump.log >> $GITHUB_STEP_SUMMARY; fi
           exit 0
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
