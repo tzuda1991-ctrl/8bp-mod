@@ -1,0 +1,94 @@
+name: 8bp
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "recon = pehle check karo | build = APK banao"
+        type: choice
+        options: ["recon", "build"]
+        default: "recon"
+      scale:
+        type: choice
+        options: ["1.0", "2.0", "4.0", "8.0", "0.5"]
+        default: "1.0"
+      allow_mismatch:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift || true
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "build-tools;34.0.0" "platform-tools"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Tools
+        run: |
+          set -e
+          mkdir -p tools work dist
+          curl -sL -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+          curl -sL -o tools/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.4/APKEditor-1.4.4.jar
+          curl -sL -o tools/il2cpp.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-net8-v6.7.40.zip
+          unzip -q tools/il2cpp.zip -d tools/il2cpp
+      - name: Base APK
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -e
+          gh release download base -p '*.apk' -O base.apk --clobber
+          java -jar tools/APKEditor.jar m -i base.apk -o merged.apk -f
+          java -jar tools/apktool.jar d -f merged.apk -o work/app --use-aapt2
+          rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi || true
+      - name: Version check
+        run: |
+          F=""; [ "${{ inputs.allow_mismatch }}" = "true" ] && F="--allow"
+          python scripts/8bp.py gate --yml work/app/apktool.yml $F
+      - name: Dump
+        run: |
+          set +e
+          dotnet tools/il2cpp/tools/Il2CppDumper.dll work/app/lib/arm64-v8a/libil2cpp.so \
+            work/app/assets/bin/Data/Managed/Metadata/global-metadata.dat work/dump > work/dump.log 2>&1
+          tail -15 work/dump.log
+      - name: Recon
+        if: ${{ inputs.mode == 'recon' }}
+        run: python scripts/8bp.py recon --app work/app
+      - name: Patch
+        if: ${{ inputs.mode == 'build' }}
+        run: python scripts/8bp.py patch --app work/app --scale "${{ inputs.scale }}"
+      - name: Rebuild
+        if: ${{ inputs.mode == 'build' }}
+        run: java -jar tools/apktool.jar b work/app -o work/u.apk --use-aapt2
+      - name: Sign
+        if: ${{ inputs.mode == 'build' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+        run: |
+          set -e
+          zipalign -p -f 4 work/u.apk work/a.apk
+          echo "$KEYSTORE_B64" | base64 -d > ks.jks
+          apksigner sign --ks ks.jks --ks-key-alias eightbp \
+            --ks-pass "pass:$KEY_PASS" --key-pass "pass:$KEY_PASS" \
+            --out dist/8BP-mod.apk work/a.apk
+          apksigner verify dist/8BP-mod.apk
+      - name: Summary
+        if: always()
+        run: |
+          [ -f dist/summary.md ] && cat dist/summary.md >> $GITHUB_STEP_SUMMARY
+          [ -f work/dump.log ] && tail -15 work/dump.log >> $GITHUB_STEP_SUMMARY
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ inputs.mode }}
+          path: dist/
+          if-no-files-found: warn
