@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Free disk
-        run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift /usr/share/dotnet/sdk/*/Sdks/Microsoft.NET.Sdk.Android || true
+        run: sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/swift || true
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
@@ -47,15 +47,27 @@ jobs:
         run: |
           set -e
           mkdir -p tools/il2cpp work dist tools/il2cpp_temp
+
+          # 1. Apktool
           curl -sLf -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+
+          # 2. Il2CppDumper
           gh release download --repo Perfare/Il2CppDumper -p '*.zip' -D tools/il2cpp_temp --clobber
-          for z in tools/il2cpp_temp/*.zip; do unzip -qo "$z" -d tools/il2cpp; done
+          for z in tools/il2cpp_temp/*.zip; do
+            unzip -qo "$z" -d tools/il2cpp
+          done
           rm -rf tools/il2cpp_temp
+
+          # 3. Android Build Tools
           BT="$(ls -d /usr/local/lib/android/sdk/build-tools/* 2>/dev/null | sort -V | tail -1)"
           if [ -n "$BT" ]; then
+            echo "Using Android Build Tools: $BT"
             echo "$BT" >> "$GITHUB_PATH"
             echo "LD_LIBRARY_PATH=$BT" >> "$GITHUB_ENV"
+            "$BT/aapt2" version || true
+            "$BT/apksigner" --version || true
           else
+            echo "Build-tools SDK not found, installing fallback..."
             sudo apt-get update && sudo apt-get install -y zipalign apksigner aapt
           fi
 
@@ -63,36 +75,70 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -eu
           rm -rf work/in work/app work/libsplit; mkdir -p work/in work/app
-          gh release download base -D work/in --clobber
-          ls -lh work/in
 
-          SRC=""; A64=""
+          gh release download base -D work/in --clobber
+          echo "=== release me kya kya hai ==="; ls -lh work/in
           for f in work/in/*; do
-            if unzip -l "$f" 2>/dev/null | grep -qE '\.apk$'; then
-              echo "[+] bundle container mila: $f"
-              mkdir -p work/in/x && unzip -qo "$f" -d work/in/x
-              break
-            fi
+            [ -f "$f" ] || continue
+            echo "--- $f :: $(file -b "$f")"
+            unzip -l "$f" 2>/dev/null | sed -n '4,12p' || true
           done
 
-          if [ -d work/in/x ]; then
-            SRC="$(find work/in/x -name '*.apk' ! -name 'split_*' | head -1)"
-            A64="$(find work/in/x -name 'split_config.arm64_v8a.apk' | head -1)"
-          else
-            SRC="$(find work/in -maxdepth 1 -name '*.apk' ! -name 'split_*' | head -1)"
-            A64="$(find work/in -maxdepth 1 -name 'split_config.arm64_v8a.apk' | head -1)"
+          is_apk() { unzip -l "$1" 2>/dev/null | awk '{print $NF}' | grep -qx 'AndroidManifest.xml'; }
+
+          SRC=""; A64=""; CANDS=()
+
+          # 1) seedhe release me plain APK / alag arm64 split
+          for f in work/in/*; do
+            [ -f "$f" ] || continue
+            is_apk "$f" || continue
+            case "$f" in
+              *split_config.arm64_v8a.apk) A64="$f" ;;
+              *) CANDS+=("$f") ;;
+            esac
+          done
+
+          # 2) bundle container (.apkm/.xapk) - sirf tab jab koi plain APK na mile
+          if [ "${#CANDS[@]}" -eq 0 ]; then
+            for f in work/in/*; do
+              [ -f "$f" ] || continue
+              if unzip -l "$f" 2>/dev/null | awk '{print $NF}' | grep -qE '\.apk$'; then
+                echo "[+] bundle container: $f"
+                mkdir -p work/in/x; unzip -qo "$f" -d work/in/x
+              fi
+            done
+            if [ -d work/in/x ]; then
+              while IFS= read -r c; do
+                is_apk "$c" || continue
+                case "$c" in
+                  *split_config.arm64_v8a.apk) A64="$c" ;;
+                  *split_*) : ;;
+                  *) CANDS+=("$c") ;;
+                esac
+              done < <(find work/in/x -type f)
+            fi
           fi
-          test -n "$SRC" || { echo "[!] base apk nahi mila"; ls -R work/in; exit 1; }
+
+          # 3) jisme arm64 libil2cpp.so hai wahi base
+          for c in "${CANDS[@]}"; do
+            if unzip -l "$c" 2>/dev/null | grep -q 'lib/arm64-v8a/libil2cpp.so'; then SRC="$c"; break; fi
+          done
+          [ -z "$SRC" ] && { [ "${#CANDS[@]}" -gt 0 ] && SRC="${CANDS[0]}"; }
+
+          if [ -z "$SRC" ]; then
+            echo "[!] koi APK (AndroidManifest.xml wali zip) nahi mili."; ls -R work/in | head -60; exit 1
+          fi
+
           echo "[+] base: $SRC"
-          echo "--- andar ki ABIs:"; unzip -l "$SRC" | grep -E 'lib/[^/]+/' | awk -F/ '{print $2}' | sort -u || echo "lib/ hai hi nahi"
+          echo "--- base ke andar ABIs:"; unzip -l "$SRC" | grep -E 'lib/[^/]+/' | awk -F/ '{print $2}' | sort -u || echo "lib/ hai hi nahi"
+          if [ -n "$A64" ]; then echo "[+] arm64 split: $A64"; unzip -l "$A64" | grep 'lib/' || true; fi
 
           java -jar tools/apktool.jar d -f "$SRC" -o work/app --use-aapt2
           mkdir -p work/app/lib
 
           if [ -n "$A64" ]; then
-            echo "[+] arm64 split: $A64"
             mkdir -p work/app/lib/arm64-v8a
             unzip -qo "$A64" 'lib/arm64-v8a/*' -d work/libsplit
             cp -f work/libsplit/lib/arm64-v8a/* work/app/lib/arm64-v8a/
@@ -102,7 +148,8 @@ jobs:
             rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi work/app/lib/x86 work/app/lib/x86_64
             ls -lh work/app/lib/arm64-v8a/
           else
-            echo "[!] libil2cpp.so nahi mila. lib listing:"; ls -R work/app/lib | head -40; exit 1
+            echo "[!] libil2cpp.so nahi mila. lib listing:"; ls -R work/app/lib | head -40
+            echo "[!] is APK me libs nahi hain -> split_config.arm64_v8a.apk upload karo"; exit 1
           fi
 
       - name: Version check
@@ -114,13 +161,17 @@ jobs:
       - name: Dump il2cpp
         run: |
           set -e
-          test -f work/app/lib/arm64-v8a/libil2cpp.so || { echo "so missing"; exit 1; }
+          test -f work/app/lib/arm64-v8a/libil2cpp.so || { echo "[!] so missing"; exit 1; }
           MD="$(find work/app -name global-metadata.dat | head -1)"
-          test -n "$MD" || { echo "global-metadata.dat missing"; exit 1; }
+          test -n "$MD" || { echo "[!] global-metadata.dat missing"; exit 1; }
           echo "[+] metadata: $MD"
           IL2CPP_DLL="$(find tools/il2cpp -name Il2CppDumper.dll -type f | head -1)"
+          test -n "$IL2CPP_DLL" || { echo "[!] Il2CppDumper.dll nahi mila"; exit 1; }
           set +e
-          dotnet "$IL2CPP_DLL" work/app/lib/arm64-v8a/libil2cpp.so "$MD" work/dump 2>&1 | tee work/dump.log
+          dotnet "$IL2CPP_DLL" \
+            work/app/lib/arm64-v8a/libil2cpp.so \
+            "$MD" \
+            work/dump 2>&1 | tee work/dump.log
           tail -20 work/dump.log
 
       - name: Recon
@@ -159,9 +210,11 @@ jobs:
         run: |
           set -e
           if [ -f patcher/ks.b64 ]; then
+            echo "[+] purana keystore mil gaya"
             base64 -d patcher/ks.b64 > ks.jks
             PASS="$(cat patcher/ks.pass)"
           else
+            echo "[+] naya keystore bana raha hoon"
             PASS="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
             keytool -genkeypair -keystore ks.jks -alias eightbp -keyalg RSA -keysize 2048 \
               -validity 12000 -storepass "$PASS" -keypass "$PASS" -dname "CN=8bp"
@@ -178,18 +231,18 @@ jobs:
             --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
             --out dist/8BP-mod.apk work/a.apk
           apksigner verify dist/8BP-mod.apk
-          unzip -l dist/8BP-mod.apk | grep 'lib/' | head
+          unzip -l dist/8BP-mod.apk | grep 'lib/' | head || true
           ls -lh dist/
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## ABIs / libs"
+            echo "## libs / ABIs"
             ls -R work/app/lib 2>/dev/null | head -20 || echo "work/app/lib nahi bana"
             echo; echo "## dump.log"
             tail -25 work/dump.log 2>/dev/null || echo "dump.log nahi bana"
-            echo; echo "## recon/patch"
+            echo; echo "## recon / patch report"
             cat dist/summary.md 2>/dev/null || true
           } >> $GITHUB_STEP_SUMMARY
           exit 0
