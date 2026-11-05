@@ -45,17 +45,14 @@ jobs:
           # 1. Apktool
           curl -sLf -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
           
-          # 2. APKEditor
-          curl -sLf -o tools/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.4/APKEditor-1.4.4.jar
-          
-          # 3. Il2CppDumper (gh release se directly fetch karega bina invalid URL issue ke)
+          # 2. Il2CppDumper
           gh release download --repo Perfare/Il2CppDumper -p '*.zip' -D tools/il2cpp_temp --clobber
           for z in tools/il2cpp_temp/*.zip; do
             unzip -qo "$z" -d tools/il2cpp
           done
           rm -rf tools/il2cpp_temp
 
-          # 4. Android Build Tools (Pre-installed runner SDK path se configure kiya gaya hai)
+          # 3. Android Build Tools
           BT="$(ls -d /usr/local/lib/android/sdk/build-tools/* 2>/dev/null | sort -V | tail -1)"
           if [ -n "$BT" ]; then
             echo "Using Android Build Tools: $BT"
@@ -76,17 +73,8 @@ jobs:
           gh release download base -p '*.apk' -O base.apk --clobber
           ls -lh base.apk
 
-          # Check karein agar package ke andar split APKs hain ya direct single APK hai
-          if unzip -l base.apk | grep -q '\.apk$'; then
-            echo "[+] Split package detected, merging..."
-            java -jar tools/APKEditor.jar m -i base.apk -o merged.apk -f
-            TARGET_APK="merged.apk"
-          else
-            echo "[+] Standalone single APK detected, skipping merge step."
-            TARGET_APK="base.apk"
-          fi
-
-          java -jar tools/apktool.jar d -f "$TARGET_APK" -o work/app --use-aapt2
+          # Seedhe decompile karein
+          java -jar tools/apktool.jar d -f base.apk -o work/app --use-aapt2
           rm -rf work/app/lib/armeabi-v7a work/app/lib/armeabi || true
 
       - name: Version check
