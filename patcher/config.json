@@ -1,0 +1,23 @@
+{
+  "version": "56.34.0",
+  "scale_default": "1.0",
+  "targets": [],
+  "candidates": [
+    { "class": "Guideline", "method": "get_MaxLength" },
+    { "class": "Guideline", "method": "get_Length" },
+    { "class": "GuidelineManager", "method": "get_MaxGuidelineLength" },
+    { "class": "AimGuideline", "method": "get_MaxLength" },
+    { "class": "AimGuideline", "method": "get_Length" },
+    { "class": "CueController", "method": "get_GuidelineLength" },
+    { "class": "CueController", "method": "get_AimLength" },
+    { "class": "PoolCue", "method": "get_AimLineLength" },
+    { "class": "BallTrajectory", "method": "get_MaxDistance" },
+    { "class": "AimSystem", "method": "get_MaxAimDistance" }
+  ],
+  "keywords": [
+    "guideline", "guidelineLength", "maxGuideline", "aimline",
+    "aimlength", "maxaim", "predictline", "trajectoryline", "linelength", "aimdistance"
+  ],
+  "exclude": ["set_", "get_Is", "Awake", "Start", "Update"],
+  "manual_patches": []
+}
