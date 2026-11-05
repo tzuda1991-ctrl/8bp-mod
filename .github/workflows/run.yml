@@ -39,11 +39,11 @@ jobs:
         run: |
           set -e
           mkdir -p tools work dist
-          curl -sL -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
-          curl -sL -o tools/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.4/APKEditor-1.4.4.jar
-          curl -sL -o tools/il2cpp.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-net8-v6.7.40.zip
+          curl -sLf -o tools/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+          curl -sLf -o tools/APKEditor.jar https://github.com/REAndroid/APKEditor/releases/download/V1.4.4/APKEditor-1.4.4.jar
+          curl -sLf -o tools/il2cpp.zip https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.40/Il2CppDumper-v6.7.40.zip
           unzip -q tools/il2cpp.zip -d tools/il2cpp
-          curl -sL -o tools/bt.zip https://dl.google.com/android/repository/build-tools_r34-linux.zip
+          curl -sLf -o tools/bt.zip https://dl.google.com/android/repository/build-tools_r34-linux.zip
           unzip -q tools/bt.zip -d tools/bt
           BT="$(dirname "$(find tools/bt -name apksigner -type f | head -1)")"
           chmod +x "$BT"/* 2>/dev/null || true
@@ -72,7 +72,8 @@ jobs:
       - name: Dump il2cpp
         run: |
           set +e
-          dotnet tools/il2cpp/tools/Il2CppDumper.dll \
+          IL2CPP_DLL="$(find tools/il2cpp -name Il2CppDumper.dll -type f | head -1)"
+          dotnet "$IL2CPP_DLL" \
             work/app/lib/arm64-v8a/libil2cpp.so \
             work/app/assets/bin/Data/Managed/Metadata/global-metadata.dat \
             work/dump > work/dump.log 2>&1
